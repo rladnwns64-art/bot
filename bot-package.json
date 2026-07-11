@@ -1,0 +1,16 @@
+{
+  "name": "medieval-bot-server",
+  "version": "1.0.0",
+  "description": "봇 학습 서버 (Supabase + TensorFlow.js)",
+  "main": "bot-server.js",
+  "scripts": {
+    "start": "node bot-server.js"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "express": "^4.19.2",
+    "cors": "^2.8.5",
+    "@supabase/supabase-js": "^2.45.0",
+    "@tensorflow/tfjs": "^4.20.0"
+  }
+}

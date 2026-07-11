@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: medieval-bot-server
+    runtime: node
+    plan: starter          # 무료면 free (콜드스타트 있음). 봇은 free 로 시작 추천
+    buildCommand: npm install
+    startCommand: node bot-server.js
+    envVars:
+      - key: SUPABASE_URL
+        sync: false          # 대시보드에서 직접 입력
+      - key: SUPABASE_KEY
+        sync: false          # ⚠️ 학습용은 service_role, 로깅만이면 publishable
+      - key: BOT_SERVER_TOKEN
+        sync: false          # 관리자 인증용 (원하는 랜덤 문자열)

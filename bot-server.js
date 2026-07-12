@@ -83,7 +83,7 @@ function buildModel() {
   m.add(tf.layers.dropout({ rate: 0.2 }));
   m.add(tf.layers.dense({ units: 32, activation: 'relu' }));
   m.add(tf.layers.dense({ units: ACTION_COUNT, activation: 'softmax' }));
-  m.compile({ optimizer: tf.train.adam(0.001), loss: 'sparseCategoricalCrossentropy', metrics: ['accuracy'] });
+  m.compile({ optimizer: tf.train.adam(0.001), loss: 'categoricalCrossentropy', metrics: ['accuracy'] });
   return m;
 }
 
@@ -97,7 +97,7 @@ async function loadModel() {
   try {
     if (!fs.existsSync(path.join(MODEL_DIR, 'model.json'))) return null;
     const m = await tf.loadLayersModel('file://' + path.join(MODEL_DIR, 'model.json'));
-    m.compile({ optimizer: tf.train.adam(0.001), loss: 'sparseCategoricalCrossentropy', metrics: ['accuracy'] });
+    m.compile({ optimizer: tf.train.adam(0.001), loss: 'categoricalCrossentropy', metrics: ['accuracy'] });
     console.log('📂 모델 로드 완료');
     return m;
   } catch (e) { console.warn('모델 로드 실패:', e.message); return null; }
@@ -249,8 +249,15 @@ app.post('/train', async (req, res) => {
       console.log(`  데이터 ${data.length}개 로드 (전체 ${count}개)`);
 
       // 텐서 변환
-      const xs = tf.tensor2d(data.map(d => stateToVector(d)));
-      const ys = tf.tensor1d(data.map(d => Math.max(0, ACTIONS.indexOf(d.action))), 'int32');
+      const xs = tf.tensor2d(data.map(d => stateToVector(d)), undefined, 'float32');
+      // 라벨을 원핫 인코딩 (tf.js int32 → floor 에러 회피)
+      const ysOneHot = data.map(d => {
+        const idx = Math.max(0, ACTIONS.indexOf(d.action));
+        const arr = new Array(ACTION_COUNT).fill(0);
+        arr[idx] = 1;
+        return arr;
+      });
+      const ys = tf.tensor2d(ysOneHot, undefined, 'float32');
 
       if (!currentModel) currentModel = buildModel();
 

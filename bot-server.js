@@ -169,10 +169,7 @@ app.post('/log', async (req, res) => {
 app.post('/predict', async (req, res) => {
   try {
     if (!currentModel) {
-      // 🎲 모델 없으면 랜덤 액션 (봇이 idle로만 있지 않도록)
-      const randomActions = ['move_left', 'move_right', 'jump', 'attack', 'idle', 'move_left', 'move_right'];
-      const action = randomActions[Math.floor(Math.random() * randomActions.length)];
-      return res.json({ ok: true, action, reason: 'random_no_model' });
+      return res.json({ ok: true, action: 'idle', reason: 'random_no_model' });
     }
     const s = req.body?.state; if (!s) return res.status(400).json({ error: 'no_state' });
     const vec = stateToVector(s);

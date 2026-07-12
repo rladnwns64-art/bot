@@ -202,6 +202,9 @@ app.post('/predict', async (req, res) => {
 // ============================================================
 let _isTraining = false;
 let _trainProgress = null;
+let _trainHistory = [];   // 학습 에폭 히스토리
+let _trainError = null;   // 마지막 학습 에러
+let _trainStartTime = null;
 
 app.post('/train', async (req, res) => {
   if (req.body?.token !== ADMIN_TOKEN) return res.status(401).json({ error: 'unauthorized' });
@@ -209,30 +212,49 @@ app.post('/train', async (req, res) => {
   const epochs = Math.min(50, Math.max(1, req.body?.epochs || 10));
   const limit = Math.min(50000, Math.max(100, req.body?.limit || 10000));
 
-  _isTraining = true; _trainProgress = { epoch: 0, loss: null, acc: null, samples: 0 };
+  _isTraining = true;
+  _trainProgress = { epoch: 0, loss: null, acc: null, samples: 0, phase: 'fetching_data' };
+  _trainHistory = [];
+  _trainError = null;
+  _trainStartTime = Date.now();
   res.json({ ok: true, started: true, epochs, limit });
 
-  // 백그라운드 학습
   (async () => {
     try {
       console.log(`🎓 학습 시작: ${limit} 샘플, ${epochs} epoch`);
-      // 데이터 가져오기
-      const { data, error } = await sb
+      _trainProgress.phase = 'fetching_data';
+
+      // 데이터 조회
+      const { data, error, count } = await sb
         .from('player_actions')
-        .select('*')
+        .select('*', { count: 'exact' })
         .order('ts', { ascending: false })
         .limit(limit);
-      if (error) { console.error('데이터 로드 실패:', error.message); _isTraining = false; return; }
-      if (!data || data.length < 20) { console.warn('데이터 부족:', data?.length); _isTraining = false; return; }
+      if (error) {
+        _trainError = 'DB 조회 실패: ' + error.message + ' (SUPABASE_KEY가 service_role인지 확인!)';
+        console.error(_trainError);
+        _isTraining = false;
+        return;
+      }
+      if (!data || data.length < 20) {
+        _trainError = `데이터 부족: ${data?.length || 0}개 (최소 20개 필요)`;
+        console.warn(_trainError);
+        _isTraining = false;
+        return;
+      }
 
       _trainProgress.samples = data.length;
+      _trainProgress.total_in_db = count;
+      _trainProgress.phase = 'preparing_tensors';
+      console.log(`  데이터 ${data.length}개 로드 (전체 ${count}개)`);
+
       // 텐서 변환
       const xs = tf.tensor2d(data.map(d => stateToVector(d)));
       const ys = tf.tensor1d(data.map(d => Math.max(0, ACTIONS.indexOf(d.action))), 'int32');
 
-      // 모델 생성/재사용
       if (!currentModel) currentModel = buildModel();
 
+      _trainProgress.phase = 'training';
       await currentModel.fit(xs, ys, {
         epochs,
         batchSize: 32,
@@ -240,25 +262,93 @@ app.post('/train', async (req, res) => {
         callbacks: {
           onEpochEnd: (epoch, logs) => {
             _trainProgress.epoch = epoch + 1;
+            _trainProgress.total_epochs = epochs;
             _trainProgress.loss = logs.loss;
             _trainProgress.acc = logs.acc;
-            console.log(`  epoch ${epoch+1}/${epochs} loss=${logs.loss.toFixed(4)} acc=${(logs.acc*100).toFixed(1)}%`);
+            _trainProgress.val_loss = logs.val_loss;
+            _trainProgress.val_acc = logs.val_acc;
+            _trainHistory.push({
+              epoch: epoch + 1,
+              loss: logs.loss,
+              acc: logs.acc,
+              val_loss: logs.val_loss,
+              val_acc: logs.val_acc,
+              ts: Date.now(),
+            });
+            console.log(`  epoch ${epoch+1}/${epochs} loss=${logs.loss.toFixed(4)} acc=${(logs.acc*100).toFixed(1)}% val_acc=${(logs.val_acc*100).toFixed(1)}%`);
           }
         }
       });
 
       xs.dispose(); ys.dispose();
+      _trainProgress.phase = 'saving';
       await saveModel(currentModel);
-      console.log('✅ 학습 완료');
+      _trainProgress.phase = 'done';
+      _trainProgress.elapsed_sec = Math.round((Date.now() - _trainStartTime) / 1000);
+      console.log(`✅ 학습 완료 (${_trainProgress.elapsed_sec}초)`);
     } catch (e) {
+      _trainError = '학습 실패: ' + e.message;
       console.error('학습 에러:', e.message);
     } finally { _isTraining = false; }
   })();
 });
 
-// 학습 진행 상태
+// 상세 학습 상태
 app.get('/train/status', (req, res) => {
-  res.json({ isTraining: _isTraining, progress: _trainProgress, hasModel: !!currentModel });
+  res.json({
+    isTraining: _isTraining,
+    progress: _trainProgress,
+    history: _trainHistory,
+    error: _trainError,
+    hasModel: !!currentModel,
+    startTime: _trainStartTime,
+    elapsedSec: _trainStartTime ? Math.round((Date.now() - _trainStartTime) / 1000) : 0,
+  });
+});
+
+// 🩺 진단 API - DB 연결 상태 등 종합 확인
+app.get('/diagnose', async (req, res) => {
+  const diag = {
+    server: '✅ 살아있음',
+    supabase_url: SUPABASE_URL ? '✅ 설정됨' : '❌ 없음',
+    supabase_key: SUPABASE_KEY ? '✅ 설정됨' : '❌ 없음',
+    admin_token: ADMIN_TOKEN !== 'change_me_pls' ? '✅ 설정됨' : '⚠️ 기본값 (BOT_SERVER_TOKEN 환경변수 설정 필요)',
+    model_loaded: currentModel ? '✅ 로드됨' : '⚠️ 없음 (학습 필요)',
+    db_can_read: null,
+    db_can_write: null,
+    db_row_count: null,
+    supabase_error: null,
+  };
+  // DB 읽기 테스트
+  try {
+    const { count, error } = await sb.from('player_actions').select('*', { count: 'exact', head: true });
+    if (error) {
+      diag.db_can_read = '❌ 실패';
+      diag.supabase_error = error.message;
+      diag.hint = 'SUPABASE_KEY가 publishable이면 SELECT 불가! service_role로 바꾸세요';
+    } else {
+      diag.db_can_read = '✅ 성공';
+      diag.db_row_count = count;
+    }
+  } catch(e) {
+    diag.db_can_read = '❌ 예외';
+    diag.supabase_error = e.message;
+  }
+  // DB 쓰기 테스트
+  try {
+    const testRow = { user_id: '__diag_test__', ts: Date.now(), action: 'idle' };
+    const { error } = await sb.from('player_actions').insert([testRow]);
+    if (error) {
+      diag.db_can_write = '❌ 실패: ' + error.message;
+    } else {
+      diag.db_can_write = '✅ 성공';
+      // 테스트 데이터 삭제 시도 (실패해도 무시)
+      await sb.from('player_actions').delete().eq('user_id', '__diag_test__');
+    }
+  } catch(e) {
+    diag.db_can_write = '❌ 예외: ' + e.message;
+  }
+  res.json(diag);
 });
 
 // ============================================================

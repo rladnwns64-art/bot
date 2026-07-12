@@ -87,20 +87,65 @@ function buildModel() {
   return m;
 }
 
-// 모델 저장/로드 (파일 시스템)
+// 모델 저장/로드
+// ⚠️ 순수 @tensorflow/tfjs는 file:// 저장 미지원
+// → 인메모리 저장 + 커스텀 핸들러로 로컬 파일 백업 시도
 async function saveModel(model) {
-  if (!fs.existsSync(MODEL_DIR)) fs.mkdirSync(MODEL_DIR, { recursive: true });
-  await model.save('file://' + MODEL_DIR);
-  console.log('💾 모델 저장:', MODEL_DIR);
+  try {
+    // 커스텀 save handler: artifacts를 파일로 수동 저장
+    const handler = tf.io.withSaveHandler(async (artifacts) => {
+      if (!fs.existsSync(MODEL_DIR)) fs.mkdirSync(MODEL_DIR, { recursive: true });
+      // model.json 저장 (weights 메타 포함)
+      const modelJson = {
+        modelTopology: artifacts.modelTopology,
+        weightSpecs: artifacts.weightSpecs,
+        format: artifacts.format,
+        generatedBy: artifacts.generatedBy,
+        convertedBy: artifacts.convertedBy,
+      };
+      fs.writeFileSync(path.join(MODEL_DIR, 'model.json'), JSON.stringify(modelJson));
+      // weights.bin 저장 (바이너리)
+      if (artifacts.weightData) {
+        const buf = Buffer.from(artifacts.weightData);
+        fs.writeFileSync(path.join(MODEL_DIR, 'weights.bin'), buf);
+      }
+      return {
+        modelArtifactsInfo: {
+          dateSaved: new Date(),
+          modelTopologyType: 'JSON',
+        }
+      };
+    });
+    await model.save(handler);
+    console.log('💾 모델 저장 완료:', MODEL_DIR);
+  } catch (e) {
+    console.warn('⚠️ 모델 파일 저장 실패 (인메모리는 유지됨):', e.message);
+  }
 }
+
 async function loadModel() {
   try {
-    if (!fs.existsSync(path.join(MODEL_DIR, 'model.json'))) return null;
-    const m = await tf.loadLayersModel('file://' + path.join(MODEL_DIR, 'model.json'));
+    const jsonPath = path.join(MODEL_DIR, 'model.json');
+    const binPath = path.join(MODEL_DIR, 'weights.bin');
+    if (!fs.existsSync(jsonPath) || !fs.existsSync(binPath)) return null;
+    // 커스텀 load handler
+    const modelJson = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+    const weightBuf = fs.readFileSync(binPath);
+    // ArrayBuffer 로 변환
+    const weightData = weightBuf.buffer.slice(weightBuf.byteOffset, weightBuf.byteOffset + weightBuf.byteLength);
+    const handler = tf.io.fromMemory({
+      modelTopology: modelJson.modelTopology,
+      weightSpecs: modelJson.weightSpecs,
+      weightData,
+    });
+    const m = await tf.loadLayersModel(handler);
     m.compile({ optimizer: tf.train.adam(0.001), loss: 'categoricalCrossentropy', metrics: ['accuracy'] });
     console.log('📂 모델 로드 완료');
     return m;
-  } catch (e) { console.warn('모델 로드 실패:', e.message); return null; }
+  } catch (e) {
+    console.warn('⚠️ 모델 로드 실패:', e.message);
+    return null;
+  }
 }
 
 // 시작 시 모델 로드 시도

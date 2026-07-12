@@ -110,7 +110,15 @@ async function loadModel() {
 // Express 서버
 // ============================================================
 const app = express();
-app.use(cors());
+app.use(cors({ origin: '*', methods: ['GET','POST','OPTIONS'], allowedHeaders: ['Content-Type','Authorization'] }));
+// 명시적 CORS 헤더 (Render 프록시가 지우는 경우 대비)
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
 app.use(express.json({ limit: '1mb' }));
 app.disable('x-powered-by');
 
